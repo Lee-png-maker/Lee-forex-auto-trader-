@@ -1,1 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 
+<title>Lee Forex AutoTrader</title>
+
+<meta name="description" content="Lee Forex AutoTrader dashboard for MT5 demo trading, risk management and robot setup.">
+
+<style>
+:root {
+  --bg: #080d18;
+  --card: #111b2d;
+  --blue: #1479ff;
+  --green: #20d69a;
+  --red: #ff5364;
+  --text: #f5f7ff;
+  --muted: #a2aec5;
+  --border: #24334c;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+header {
+  padding: 24px 18px;
+  background: #0d1525;
+  border-bottom: 1px solid var(--border);
+}
+
+.logo {
+  color: var(--blue);
+  font-size: 13px;
+  font-weight: bold;
+  letter-spacing: 3px;
+}
+
+h1 {
+  font-size: 27px;
+  margin: 12px 0 8px;
+}
+
+.subtitle {
+  color: var(--muted);
+  line-height: 1.6;
+  font-size: 14px;
+}
+
+.container {
+  width: 100%;
+  max-width: 1050px;
+  padding: 18px;
+  margin: auto;
+}
+
+.notice {
+  background: #30240d;
+  border: 1px solid #80601b;
+  padding: 15px;
+  border-radius: 12px;
+  margin-bottom: 20px;
+  line-height: 1.6;
+  font-size: 13px;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: #10291f;
+  border: 1px solid #245d43;
+  padding: 14px;
+  border-radius: 12px;
+  margin-bottom: 20px;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+.status small {
+  color: #9de7c8;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  padding: 17px;
+  border-radius: 14px;
+  min-width: 0;
+}
+
+.card h3 {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0 0 13px;
+}
+
+.value {
+  font-size: 21px;
+  font-weight: bold;
+  overflow-wrap: anywhere;
+}
+
+.green {
+  color: var(--green);
+}
+
+.blue {
+  color: #69a8ff;
+}
+
+.red {
+  color: var(--red);
+}
+
+section {
+  margin-top: 30px;
+}
+
+h2 {
+  font-size: 20px;
+  margin-bottom: 15px;
+}
+
+.setting {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+
+.setting span:first-child {
+  color: var(--muted);
+}
+
+.setting span:last-child {
+  text-align: right;
+  font-weight: bold;
+}
+
+.steps {
+  line-height: 1.8;
+  padding-left: 20px;
+  color: #d9e2f4;
+  font-size: 14px;
+}
+
+.button {
+  display: block;
+  text-align: center;
+  padding: 15px;
+  border-radius: 10px;
+  background: var(--blue);
+  color: white;
+  text-decoration: none;
+  font-weight: bold;
+  margin-top: 12px;
+}
+
+.button.secondary {
+  background: #182841;
+  border: 1px solid #344d70;
+}
+
+footer {
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 30px 18px;
+  line-height: 1.8;
+}
+
+@media (max-width: 420px) {
+  .grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .value {
+    font-size: 18px;
+  }
+
+  .setting {
+    font-size: 12px;
+  }
+}
+</style>
+</head>
+
+<body>
+
+<header>
+  <div class="logo">LEE TRADING SYSTEMS</div>
+  <h1>Lee Forex AutoTrader</h1>
+  <div class="subtitle">
+    MT5 trading robot dashboard<br>
+    RCG Markets · Conservative strategy
+  </div>
+</header>
+
+<main class="container">
+
+  <div class="notice">
+    <strong>DEMO TESTING ONLY</strong><br>
+    This dashboard does not connect to your broker or execute trades.
+    The actual MT5 Expert Advisor must be compiled, installed and
+    tested separately. Never assume the robot is running because
+    this website is open.
+  </div>
+
+  <div class="status">
+    <span class="dot"></span>
+    <div>
+      <strong>Dashboard available</strong><br>
+      <small>Live broker connection: Not connected</small>
+    </div>
+  </div>
+
+  <div class="grid">
+
+    <div class="card">
+      <h3>TRADING PLATFORM</h3>
+      <div class="value blue">MT5</div>
+    </div>
+
+    <div class="card">
+      <h3>ACCOUNT MODE</h3>
+      <div class="value green">DEMO</div>
+    </div>
+
+    <div class="card">
+      <h3>LEVERAGE</h3>
+      <div class="value">1:100</div>
+    </div>
+
+    <div class="card">
+      <h3>ROBOT STATUS</h3>
+      <div class="value red">Not running</div>
+    </div>
+
+    <div class="card">
+      <h3>OPEN POSITIONS</h3>
+      <div class="value">Not connected</div>
+    </div>
+
+    <div class="card">
+      <h3>ACCOUNT BALANCE</h3>
+      <div class="value">Unavailable</div>
+    </div>
+
+  </div>
+
+  <section>
+    <h2>Robot configuration</h2>
+
+    <div class="card">
+
+      <div class="setting">
+        <span>Broker</span>
+        <span>RCG Markets</span>
+      </div>
+
+      <div class="setting">
+        <span>Strategy</span>
+        <span>Conservative trend-following</span>
+      </div>
+
+      <div class="setting">
+        <span>Entry indicators</span>
+        <span>Moving averages + RSI</span>
+      </div>
+
+      <div class="setting">
+        <span>Stop-loss</span>
+        <span>Planned: ATR-based</span>
+      </div>
+
+      <div class="setting">
+        <span>Take-profit</span>
+        <span>Planned: 1.5R target</span>
+      </div>
+
+      <div class="setting">
+        <span>Risk per trade</span>
+        <span>Target 0.5%</span>
+      </div>
+
+      <div class="setting">
+        <span>Daily loss threshold</span>
+        <span>Target 2%</span>
+      </div>
+
+      <div class="setting">
+        <span>Execution</span>
+        <span>MT5 Expert Advisor required</span>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <h2>Installation guide</h2>
+
+    <div class="card">
+      <ol class="steps">
+        <li>Create and maintain the source code in this GitHub repository.</li>
+        <li>Access MT5 on a Windows computer.</li>
+        <li>Open MetaEditor and create an MQL5 Expert Advisor.</li>
+        <li>Paste in the robot's MQL5 source code.</li>
+        <li>Compile and resolve any errors.</li>
+        <li>Test using the MT5 Strategy Tester.</li>
+        <li>Run it on your RCG Markets demo account.</li>
+        <li>Verify position sizing, stop-losses and daily risk controls.</li>
+      </ol>
+    </div>
+
+    <a class="button"
+       href="https://github.com/Lee-png-maker/Lee-Forex-AutoTrader">
+       Open Robot Repository
+    </a>
+
+    <a class="button secondary"
+       href="https://www.metatrader5.com/">
+       MetaTrader 5 Official Website
+    </a>
+  </section>
+
+  <section>
+    <h2>Risk warning</h2>
+
+    <div class="notice">
+      Forex trading can result in the loss of your entire trading
+      balance. A stop-loss cannot guarantee the exact exit price.
+      The risk settings displayed here are planned settings, not
+      proof that a trading robot has implemented them correctly.
+
+      The robot must skip trades when broker minimum volume would
+      exceed the intended risk. A daily loss threshold cannot
+      guarantee that total losses will stay within that percentage.
+      No strategy guarantees profits.
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  LEE FOREX AUTOTRADER<br>
+  Independent trading software project<br>
+  Not affiliated with RCG Markets or MetaQuotes.<br>
+  Dashboard information is not live trading data.
+</footer>
+
+</body>
+    </html>
