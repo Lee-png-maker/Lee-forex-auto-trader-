@@ -1,789 +1,596 @@
+//+------------------------------------------------------------------+
+//|                  Lee_Forex_AutoTrader.mq5                        |
+//|                  Lee Forex AutoTrader                            |
+//|                  DEMO TESTING ONLY                                |
+//+------------------------------------------------------------------+
+#property strict
+#property version   "1.00"
+#property description "Lee Forex AutoTrader - EMA, RSI and ATR strategy"
 
-<!DOCTYPE html>
-<html lang="en-ZA">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="theme-color" content="#07111f">
+#include <Trade/Trade.mqh>
 
-<title>Lee Forex AutoTrader</title>
+CTrade trade;
 
-<meta name="description" content="Lee Forex AutoTrader dashboard for monitoring forex strategies, risk settings and demo trading.">
+//========================= INPUT SETTINGS ==========================
 
-<style>
-:root {
-  --bg: #07111f;
-  --panel: #101e30;
-  --panel2: #14263b;
-  --border: #263c54;
-  --text: #edf4ff;
-  --muted: #9bb0c8;
-  --blue: #36a3ff;
-  --green: #27d69b;
-  --red: #ff6277;
-  --yellow: #ffc857;
-  --purple: #b69cff;
+input double RiskPercent          = 0.5;
+input double DailyLossLimitPct    = 2.0;
+input int    MaxOpenPositions     = 3;
+
+input int    FastEMA              = 20;
+input int    SlowEMA              = 50;
+input int    RSIPeriod            = 14;
+input int    ATRPeriod            = 14;
+
+input double RSI_Buy_Min          = 50.0;
+input double RSI_Buy_Max          = 70.0;
+input double RSI_Sell_Min         = 30.0;
+input double RSI_Sell_Max         = 50.0;
+
+input double ATR_StopMultiplier   = 2.0;
+input double RewardRiskRatio      = 1.5;
+
+input ENUM_TIMEFRAMES SignalTimeframe = PERIOD_H1;
+
+input ulong  MagicNumber          = 68102601;
+input int    MaxSpreadPoints      = 30;
+input int    SlippagePoints       = 20;
+
+// Add broker-specific symbols exactly as shown in Market Watch.
+// This list is a starting point; verify every symbol with your broker.
+input string TradingSymbols =
+"EURUSD,GBPUSD,USDJPY,USDCHF,AUDUSD,USDCAD,NZDUSD";
+
+//========================= GLOBAL VARIABLES ========================
+
+string Symbols[];
+datetime LastBarTime[];
+int FastEMAHandles[];
+int SlowEMAHandles[];
+int RSIHandles[];
+int ATRHandles[];
+
+int SymbolCount = 0;
+
+int DayKey = -1;
+double DayStartEquity = 0.0;
+bool DailyLimitReached = false;
+
+//========================= DATE HELPERS ============================
+
+int GetDayKey(datetime timeValue)
+{
+   MqlDateTime dt;
+   TimeToStruct(timeValue, dt);
+
+   return dt.year * 10000 + dt.mon * 100 + dt.day;
 }
 
-* {
-  box-sizing: border-box;
+//========================= SYMBOL HELPERS ==========================
+
+string CleanSymbol(string value)
+{
+   StringTrimLeft(value);
+   StringTrimRight(value);
+   return value;
 }
 
-body {
-  margin: 0;
-  font-family: Arial, Helvetica, sans-serif;
-  background: var(--bg);
-  color: var(--text);
-  line-height: 1.6;
+bool IsOurPosition(ulong ticket)
+{
+   if(!PositionSelectByTicket(ticket))
+      return false;
+
+   if((ulong)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+      return false;
+
+   return true;
 }
 
-header {
-  background: #0b1929;
-  border-bottom: 1px solid var(--border);
-  padding: 20px;
+bool IsSymbolAlreadyTraded(string symbol)
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(!IsOurPosition(ticket))
+         continue;
+
+      if(PositionGetString(POSITION_SYMBOL) == symbol)
+         return true;
+   }
+
+   return false;
 }
 
-.header-inner {
-  max-width: 1200px;
-  margin: auto;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 15px;
-  flex-wrap: wrap;
+int CountOurPositions()
+{
+   int count = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+
+      if(ticket == 0)
+         continue;
+
+      if(IsOurPosition(ticket))
+         count++;
+   }
+
+   return count;
 }
 
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 12px;
+//========================= DAILY RISK ==============================
+
+void UpdateDailyRisk()
+{
+   datetime now = TimeCurrent();
+   int today = GetDayKey(now);
+
+   if(today != DayKey)
+   {
+      DayKey = today;
+      DayStartEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+      DailyLimitReached = false;
+
+      Print("Lee AutoTrader: new trading day. Starting equity = ",
+            DoubleToString(DayStartEquity, 2));
+   }
+
+   if(DayStartEquity <= 0.0)
+      return;
+
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   double lossPercent =
+      ((DayStartEquity - equity) / DayStartEquity) * 100.0;
+
+   if(lossPercent >= DailyLossLimitPct)
+   {
+      DailyLimitReached = true;
+
+      Print("Lee AutoTrader: daily loss limit reached. ",
+            "No new trades will be opened.");
+   }
 }
 
-.logo {
-  width: 48px;
-  height: 48px;
-  border-radius: 12px;
-  display: grid;
-  place-items: center;
-  background: linear-gradient(135deg, #168cff, #6248e8);
-  font-weight: 900;
-  font-size: 19px;
-  color: white;
+//========================= INDICATOR DATA ===========================
+
+bool ReadBufferValue(int handle, int bufferNumber, int shift,
+                     double &value)
+{
+   if(handle == INVALID_HANDLE)
+      return false;
+
+   double values[];
+   ArraySetAsSeries(values, true);
+
+   if(CopyBuffer(handle, bufferNumber, shift, 1, values) != 1)
+      return false;
+
+   value = values[0];
+
+   if(value == EMPTY_VALUE || !MathIsValidNumber(value))
+      return false;
+
+   return true;
 }
 
-h1 {
-  margin: 0;
-  font-size: 23px;
+//========================= LOT CALCULATION ==========================
+
+double CalculateVolume(string symbol, double stopDistance)
+{
+   if(stopDistance <= 0.0)
+      return 0.0;
+
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double riskMoney = equity * RiskPercent / 100.0;
+
+   if(equity <= 0.0 || riskMoney <= 0.0)
+      return 0.0;
+
+   double tickSize =
+      SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
+
+   double tickValueLoss =
+      SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE_LOSS);
+
+   if(tickValueLoss <= 0.0)
+      tickValueLoss = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
+
+   double volumeMin = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+   double volumeMax = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+   double volumeStep = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+
+   if(tickSize <= 0.0 || tickValueLoss <= 0.0 ||
+      volumeMin <= 0.0 || volumeMax <= 0.0 || volumeStep <= 0.0)
+   {
+      Print("Lee AutoTrader: invalid symbol risk data for ", symbol);
+      return 0.0;
+   }
+
+   double lossPerLot =
+      (stopDistance / tickSize) * tickValueLoss;
+
+   if(lossPerLot <= 0.0)
+      return 0.0;
+
+   double volume = riskMoney / lossPerLot;
+
+   // Round DOWN so the requested risk is not increased by rounding.
+   volume = MathFloor(volume / volumeStep) * volumeStep;
+
+   volume = MathMin(volume, volumeMax);
+
+   // Do not force the broker minimum if it exceeds the risk budget.
+   if(volume < volumeMin)
+   {
+      Print("Lee AutoTrader: minimum lot would exceed risk budget for ",
+            symbol, ". Trade skipped.");
+      return 0.0;
+   }
+
+   int volumeDigits = 0;
+   double step = volumeStep;
+
+   while(volumeDigits < 8 &&
+         MathAbs(step - MathRound(step)) > 0.00000001)
+   {
+      step *= 10.0;
+      volumeDigits++;
+   }
+
+   return NormalizeDouble(volume, volumeDigits);
 }
 
-.brand p {
-  margin: 2px 0 0;
-  color: var(--muted);
-  font-size: 12px;
+//========================= SPREAD FILTER ============================
+
+bool SpreadIsAcceptable(string symbol)
+{
+   MqlTick tick;
+
+   if(!SymbolInfoTick(symbol, tick))
+      return false;
+
+   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+
+   if(point <= 0.0)
+      return false;
+
+   double spreadPoints = (tick.ask - tick.bid) / point;
+
+   if(spreadPoints > MaxSpreadPoints)
+      return false;
+
+   return true;
 }
 
-.status {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  border: 1px solid #2b604e;
-  border-radius: 30px;
-  color: var(--green);
-  background: #102a27;
-  font-size: 12px;
-  font-weight: bold;
+//========================= NEW BAR CHECK ============================
+
+bool IsNewBar(int index)
+{
+   datetime barTime = iTime(Symbols[index], SignalTimeframe, 0);
+
+   if(barTime <= 0)
+      return false;
+
+   if(LastBarTime[index] == 0)
+   {
+      LastBarTime[index] = barTime;
+      return false;
+   }
+
+   if(barTime != LastBarTime[index])
+   {
+      LastBarTime[index] = barTime;
+      return true;
+   }
+
+   return false;
 }
 
-.status-dot {
-  height: 8px;
-  width: 8px;
-  border-radius: 50%;
-  background: var(--green);
+//========================= TRADING SIGNAL ===========================
+
+void CheckSymbol(int index)
+{
+   string symbol = Symbols[index];
+
+   if(DailyLimitReached)
+      return;
+
+   if(CountOurPositions() >= MaxOpenPositions)
+      return;
+
+   // Avoid duplicate positions on the same symbol.
+   if(IsSymbolAlreadyTraded(symbol))
+      return;
+
+   if(!SpreadIsAcceptable(symbol))
+      return;
+
+   double fastEMA, slowEMA, rsi, atr;
+
+   // Use the last completed candle (shift 1).
+   if(!ReadBufferValue(FastEMAHandles[index], 0, 1, fastEMA))
+      return;
+
+   if(!ReadBufferValue(SlowEMAHandles[index], 0, 1, slowEMA))
+      return;
+
+   if(!ReadBufferValue(RSIHandles[index], 0, 1, rsi))
+      return;
+
+   if(!ReadBufferValue(ATRHandles[index], 0, 1, atr))
+      return;
+
+   if(atr <= 0.0)
+      return;
+
+   bool buySignal =
+      fastEMA > slowEMA &&
+      rsi >= RSI_Buy_Min &&
+      rsi <= RSI_Buy_Max;
+
+   bool sellSignal =
+      fastEMA < slowEMA &&
+      rsi >= RSI_Sell_Min &&
+      rsi <= RSI_Sell_Max;
+
+   if(!buySignal && !sellSignal)
+      return;
+
+   MqlTick tick;
+
+   if(!SymbolInfoTick(symbol, tick))
+      return;
+
+   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+
+   if(point <= 0.0)
+      return;
+
+   double stopDistance = atr * ATR_StopMultiplier;
+
+   long stopLevelPoints =
+      SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
+
+   double minimumStopDistance = stopLevelPoints * point;
+
+   if(stopDistance < minimumStopDistance)
+      stopDistance = minimumStopDistance;
+
+   // Add a small distance to help meet broker stop requirements.
+   stopDistance = MathMax(stopDistance, 2.0 * point);
+
+   double volume = CalculateVolume(symbol, stopDistance);
+
+   if(volume <= 0.0)
+      return;
+
+   double sl = 0.0;
+   double tp = 0.0;
+   bool sent = false;
+
+   trade.SetExpertMagicNumber(MagicNumber);
+   trade.SetDeviationInPoints(SlippagePoints);
+   trade.SetTypeFillingBySymbol(symbol);
+
+   if(buySignal)
+   {
+      sl = NormalizeDouble(tick.ask - stopDistance, digits);
+      tp = NormalizeDouble(
+         tick.ask + stopDistance * RewardRiskRatio, digits);
+
+      sent = trade.Buy(
+         volume, symbol, 0.0, sl, tp, "Lee AutoTrader BUY");
+   }
+   else if(sellSignal)
+   {
+      sl = NormalizeDouble(tick.bid + stopDistance, digits);
+      tp = NormalizeDouble(
+         tick.bid - stopDistance * RewardRiskRatio, digits);
+
+      sent = trade.Sell(
+         volume, symbol, 0.0, sl, tp, "Lee AutoTrader SELL");
+   }
+
+   if(sent)
+   {
+      Print("Lee AutoTrader: order request accepted for ", symbol,
+            ". Volume=", DoubleToString(volume, 2),
+            ". Check broker execution result.");
+   }
+   else
+   {
+      Print("Lee AutoTrader: order failed for ", symbol,
+            ". Retcode=", trade.ResultRetcode(),
+            " ", trade.ResultRetcodeDescription());
+   }
 }
 
-main {
-  max-width: 1200px;
-  margin: auto;
-  padding: 22px;
+//========================= INITIALIZATION ============================
+
+int OnInit()
+{
+   // Safety: this version refuses to operate on a real trading account.
+   ENUM_ACCOUNT_TRADE_MODE accountMode =
+      (ENUM_ACCOUNT_TRADE_MODE)AccountInfoInteger(ACCOUNT_TRADE_MODE);
+
+   if(accountMode != ACCOUNT_TRADE_MODE_DEMO)
+   {
+      Print("Lee AutoTrader safety stop: demo account required.");
+      return INIT_FAILED;
+   }
+
+   if(RiskPercent <= 0.0 || RiskPercent > 1.0)
+   {
+      Print("RiskPercent must be above 0 and no more than 1%.");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
+   if(DailyLossLimitPct <= 0.0 ||
+      MaxOpenPositions < 1 ||
+      FastEMA <= 0 ||
+      SlowEMA <= FastEMA ||
+      RSIPeriod <= 0 ||
+      ATRPeriod <= 0 ||
+      ATR_StopMultiplier <= 0.0 ||
+      RewardRiskRatio <= 0.0)
+   {
+      Print("Lee AutoTrader: invalid input settings.");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
+   string rawSymbols[];
+   ushort separator = StringGetCharacter(",", 0);
+
+   int total = StringSplit(TradingSymbols, separator, rawSymbols);
+
+   if(total <= 0)
+   {
+      Print("Lee AutoTrader: no symbols were supplied.");
+      return INIT_FAILED;
+   }
+
+   ArrayResize(Symbols, total);
+
+   for(int i = 0; i < total; i++)
+   {
+      string symbol = CleanSymbol(rawSymbols[i]);
+
+      if(symbol == "")
+         continue;
+
+      if(!SymbolSelect(symbol, true))
+      {
+         Print("Lee AutoTrader: cannot select symbol ", symbol,
+               ". Check the broker's exact symbol name.");
+         continue;
+      }
+
+      int fastHandle = iMA(
+         symbol, SignalTimeframe, FastEMA, 0, MODE_EMA, PRICE_CLOSE);
+
+      int slowHandle = iMA(
+         symbol, SignalTimeframe, SlowEMA, 0, MODE_EMA, PRICE_CLOSE);
+
+      int rsiHandle = iRSI(
+         symbol, SignalTimeframe, RSIPeriod, PRICE_CLOSE);
+
+      int atrHandle = iATR(
+         symbol, SignalTimeframe, ATRPeriod);
+
+      if(fastHandle == INVALID_HANDLE ||
+         slowHandle == INVALID_HANDLE ||
+         rsiHandle == INVALID_HANDLE ||
+         atrHandle == INVALID_HANDLE)
+      {
+         Print("Lee AutoTrader: indicator setup failed for ", symbol);
+
+         if(fastHandle != INVALID_HANDLE)
+            IndicatorRelease(fastHandle);
+
+         if(slowHandle != INVALID_HANDLE)
+            IndicatorRelease(slowHandle);
+
+         if(rsiHandle != INVALID_HANDLE)
+            IndicatorRelease(rsiHandle);
+
+         if(atrHandle != INVALID_HANDLE)
+            IndicatorRelease(atrHandle);
+
+         continue;
+      }
+
+      int n = SymbolCount;
+
+      ArrayResize(Symbols, n + 1);
+      ArrayResize(LastBarTime, n + 1);
+      ArrayResize(FastEMAHandles, n + 1);
+      ArrayResize(SlowEMAHandles, n + 1);
+      ArrayResize(RSIHandles, n + 1);
+      ArrayResize(ATRHandles, n + 1);
+
+      Symbols[n] = symbol;
+      LastBarTime[n] = 0;
+      FastEMAHandles[n] = fastHandle;
+      SlowEMAHandles[n] = slowHandle;
+      RSIHandles[n] = rsiHandle;
+      ATRHandles[n] = atrHandle;
+
+      SymbolCount++;
+   }
+
+   if(SymbolCount == 0)
+   {
+      Print("Lee AutoTrader: no usable symbols. Check Market Watch.");
+      return INIT_FAILED;
+   }
+
+   UpdateDailyRisk();
+
+   EventSetTimer(10);
+
+   Print("Lee Forex AutoTrader initialized on DEMO.");
+   Print("Loaded symbols: ", SymbolCount);
+   Print("Risk per trade: ", RiskPercent, "%");
+   Print("Daily loss threshold: ", DailyLossLimitPct, "%");
+   Print("Maximum EA positions: ", MaxOpenPositions);
+
+   return INIT_SUCCEEDED;
 }
 
-.notice {
-  border: 1px solid #6b5528;
-  background: #2b2415;
-  color: #ffe0a0;
-  padding: 15px;
-  border-radius: 12px;
-  margin-bottom: 22px;
-  font-size: 13px;
+//========================= MAIN LOOP ================================
+
+void OnTick()
+{
+   UpdateDailyRisk();
+
+   for(int i = 0; i < SymbolCount; i++)
+   {
+      if(IsNewBar(i))
+         CheckSymbol(i);
+   }
 }
 
-.hero {
-  padding: 28px;
-  background: linear-gradient(120deg, #132b47, #15203d);
-  border: 1px solid var(--border);
-  border-radius: 18px;
-  margin-bottom: 22px;
+// Timer allows the EA to check symbols even when the chart symbol
+// itself has limited tick activity.
+void OnTimer()
+{
+   UpdateDailyRisk();
+
+   for(int i = 0; i < SymbolCount; i++)
+   {
+      if(IsNewBar(i))
+         CheckSymbol(i);
+   }
 }
 
-.eyebrow {
-  color: var(--blue);
-  font-size: 12px;
-  font-weight: bold;
-  letter-spacing: 2px;
-  text-transform: uppercase;
+//========================= CLEANUP ==================================
+
+void OnDeinit(const int reason)
+{
+   EventKillTimer();
+
+   for(int i = 0; i < SymbolCount; i++)
+   {
+      if(FastEMAHandles[i] != INVALID_HANDLE)
+         IndicatorRelease(FastEMAHandles[i]);
+
+      if(SlowEMAHandles[i] != INVALID_HANDLE)
+         IndicatorRelease(SlowEMAHandles[i]);
+
+      if(RSIHandles[i] != INVALID_HANDLE)
+         IndicatorRelease(RSIHandles[i]);
+
+      if(ATRHandles[i] != INVALID_HANDLE)
+         IndicatorRelease(ATRHandles[i]);
+   }
+
+   Print("Lee Forex AutoTrader stopped.");
 }
-
-.hero h2 {
-  font-size: clamp(25px, 5vw, 38px);
-  margin: 8px 0;
-  line-height: 1.2;
-}
-
-.hero p {
-  color: #bfd0e5;
-  max-width: 700px;
-}
-
-.button-row {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-top: 20px;
-}
-
-button,
-.button {
-  border: 0;
-  border-radius: 9px;
-  padding: 11px 16px;
-  font-weight: bold;
-  cursor: pointer;
-  font-size: 13px;
-  text-decoration: none;
-}
-
-.primary {
-  background: var(--blue);
-  color: #06111e;
-}
-
-.secondary {
-  background: #22364d;
-  color: white;
-  border: 1px solid #3a526e;
-}
-
-.section-title {
-  margin: 28px 0 13px;
-  font-size: 18px;
-}
-
-.grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 14px;
-}
-
-.card {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 18px;
-  min-width: 0;
-}
-
-.card-label {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.metric {
-  font-size: 27px;
-  font-weight: bold;
-  margin: 8px 0 3px;
-  overflow-wrap: anywhere;
-}
-
-.green {
-  color: var(--green);
-}
-
-.red {
-  color: var(--red);
-}
-
-.blue {
-  color: var(--blue);
-}
-
-.yellow {
-  color: var(--yellow);
-}
-
-.purple {
-  color: var(--purple);
-}
-
-.small {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.two-columns {
-  display: grid;
-  grid-template-columns: 1.2fr 0.8fr;
-  gap: 16px;
-  margin-top: 16px;
-}
-
-.table-wrap {
-  width: 100%;
-  overflow-x: auto;
-}
-
-table {
-  width: 100%;
-  border-collapse: collapse;
-  min-width: 480px;
-  font-size: 13px;
-}
-
-th,
-td {
-  text-align: left;
-  padding: 13px 10px;
-  border-bottom: 1px solid var(--border);
-}
-
-th {
-  color: var(--muted);
-  font-size: 11px;
-  text-transform: uppercase;
-}
-
-.pair {
-  font-weight: bold;
-}
-
-.badge {
-  display: inline-block;
-  padding: 4px 8px;
-  border-radius: 6px;
-  background: #1c344a;
-  color: var(--blue);
-  font-size: 11px;
-  font-weight: bold;
-}
-
-.badge.green-badge {
-  color: var(--green);
-  background: #14352e;
-}
-
-.badge.yellow-badge {
-  color: var(--yellow);
-  background: #3a301b;
-}
-
-.settings {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 14px;
-}
-
-.field label {
-  display: block;
-  color: var(--muted);
-  font-size: 12px;
-  margin-bottom: 6px;
-}
-
-.field input,
-.field select {
-  width: 100%;
-  padding: 12px;
-  background: #091625;
-  color: white;
-  border: 1px solid #344a63;
-  border-radius: 8px;
-  font-size: 14px;
-}
-
-.field input:focus,
-.field select:focus {
-  outline: 2px solid var(--blue);
-  border-color: var(--blue);
-}
-
-.info-box {
-  background: var(--panel2);
-  border-radius: 10px;
-  padding: 14px;
-  margin-top: 14px;
-  font-size: 13px;
-}
-
-.progress {
-  background: #26384c;
-  height: 8px;
-  border-radius: 20px;
-  overflow: hidden;
-  margin: 12px 0;
-}
-
-.progress-bar {
-  height: 100%;
-  width: 25%;
-  background: var(--green);
-  border-radius: 20px;
-}
-
-.check-list {
-  padding-left: 20px;
-  color: #c1d1e4;
-  font-size: 13px;
-}
-
-.check-list li {
-  margin: 9px 0;
-}
-
-footer {
-  max-width: 1200px;
-  margin: auto;
-  padding: 25px 22px 35px;
-  color: var(--muted);
-  font-size: 12px;
-  text-align: center;
-  border-top: 1px solid var(--border);
-}
-
-footer strong {
-  color: var(--blue);
-}
-
-@media (max-width: 850px) {
-  .grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .two-columns {
-    grid-template-columns: 1fr;
-  }
-}
-
-@media (max-width: 480px) {
-  header {
-    padding: 15px;
-  }
-
-  main {
-    padding: 14px;
-  }
-
-  .hero {
-    padding: 20px;
-  }
-
-  h1 {
-    font-size: 19px;
-  }
-
-  .grid {
-    gap: 9px;
-  }
-
-  .card {
-    padding: 13px;
-  }
-
-  .metric {
-    font-size: 22px;
-  }
-
-  .settings {
-    grid-template-columns: 1fr;
-  }
-
-  .status {
-    font-size: 11px;
-  }
-}
-</style>
-</head>
-
-<body>
-
-<header>
-  <div class="header-inner">
-    <div class="brand">
-      <div class="logo">LEE</div>
-      <div>
-        <h1>Lee <span class="blue">Forex</span> <span class="green">AutoTrader</span></h1>
-        <p>Forex Strategy & Risk Dashboard</p>
-      </div>
-    </div>
-
-    <div class="status">
-      <span class="status-dot"></span>
-      DASHBOARD ONLINE
-    </div>
-  </div>
-</header>
-
-<main>
-
-  <div class="notice">
-    <strong>Important:</strong> This dashboard is not connected to your broker.
-    The values shown are demonstration examples, not live account information.
-    It does not place or manage trades. Never use these example figures to make
-    financial decisions.
-  </div>
-
-  <section class="hero">
-    <div class="eyebrow">LEE AUTOTRADER SYSTEM</div>
-
-    <h2>Trade with a plan.<br>
-      <span class="blue">Protect your capital.</span>
-    </h2>
-
-    <p>
-      A clean dashboard for viewing your forex strategy, monitoring risk
-      settings and preparing for demo testing before considering any live trading.
-    </p>
-
-    <div class="button-row">
-      <button class="primary" onclick="showDemoNotice()">
-        View Demo Status
-      </button>
-
-      <a class="button secondary"
-         href="https://www.metatrader5.com/"
-         target="_blank"
-         rel="noopener noreferrer">
-        MetaTrader 5 Website
-      </a>
-    </div>
-  </section>
-
-  <h2 class="section-title">Account Overview</h2>
-
-  <section class="grid">
-    <div class="card">
-      <div class="card-label">Account Balance</div>
-      <div class="metric blue">—</div>
-      <div class="small">Waiting for broker connection</div>
-    </div>
-
-    <div class="card">
-      <div class="card-label">Equity</div>
-      <div class="metric purple">—</div>
-      <div class="small">Live account data unavailable</div>
-    </div>
-
-    <div class="card">
-      <div class="card-label">Open Positions</div>
-      <div class="metric yellow">—</div>
-      <div class="small">No trading feed connected</div>
-    </div>
-
-    <div class="card">
-      <div class="card-label">Today's Profit/Loss</div>
-      <div class="metric">—</div>
-      <div class="small">No verified trading results</div>
-    </div>
-  </section>
-
-  <div class="two-columns">
-
-    <section class="card">
-      <h2 class="section-title" style="margin-top:0">
-        Currency Pairs
-      </h2>
-
-      <p class="small">
-        Watchlist for the proposed strategy. These are not live prices or signals.
-      </p>
-
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Currency Pair</th>
-              <th>Market</th>
-              <th>Signal</th>
-            </tr>
-          </thead>
-
-          <tbody>
-            <tr>
-              <td class="pair">EURUSD</td>
-              <td>Forex</td>
-              <td><span class="badge">No live data</span></td>
-            </tr>
-
-            <tr>
-              <td class="pair">GBPUSD</td>
-              <td>Forex</td>
-              <td><span class="badge">No live data</span></td>
-            </tr>
-
-            <tr>
-              <td class="pair">USDJPY</td>
-              <td>Forex</td>
-              <td><span class="badge">No live data</span></td>
-            </tr>
-
-            <tr>
-              <td class="pair">USDCHF</td>
-              <td>Forex</td>
-              <td><span class="badge">No live data</span></td>
-            </tr>
-
-            <tr>
-              <td class="pair">AUDUSD</td>
-              <td>Forex</td>
-              <td><span class="badge">No live data</span></td>
-            </tr>
-
-            <tr>
-              <td class="pair">USDCAD</td>
-              <td>Forex</td>
-              <td><span class="badge">No live data</span></td>
-            </tr>
-
-            <tr>
-              <td class="pair">NZDUSD</td>
-              <td>Forex</td>
-              <td><span class="badge">No live data</span></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2 class="section-title" style="margin-top:0">
-        Proposed Strategy
-      </h2>
-
-      <div class="info-box">
-        <span class="blue">Strategy:</span>
-        EMA 20 / EMA 50 trend confirmation
-      </div>
-
-      <div class="info-box">
-        <span class="purple">Confirmation:</span>
-        RSI indicator
-      </div>
-
-      <div class="info-box">
-        <span class="yellow">Stop Loss:</span>
-        ATR-based calculation
-      </div>
-
-      <div class="info-box">
-        <span class="green">Take Profit:</span>
-        Proposed reward-to-risk ratio of 1.5:1
-      </div>
-
-      <p class="small">
-        These are proposed settings, not proof of profitability.
-        Strategy performance must be tested.
-      </p>
-    </section>
-
-  </div>
-
-  <h2 class="section-title">Risk Management Settings</h2>
-
-  <section class="card">
-    <p class="small">
-      Change these example values to explore the settings.
-      They are saved only in this browser and do not control MetaTrader 5.
-    </p>
-
-    <div class="settings">
-
-      <div class="field">
-        <label for="risk">Proposed risk per trade (%)</label>
-        <input id="risk" type="number" min="0.1" max="1"
-               step="0.1" value="0.5">
-      </div>
-
-      <div class="field">
-        <label for="dailyLoss">Example daily loss limit (%)</label>
-        <input id="dailyLoss" type="number" min="0.5" max="5"
-               step="0.5" value="2">
-      </div>
-
-      <div class="field">
-        <label for="maxPositions">Maximum open positions</label>
-        <select id="maxPositions">
-          <option value="1">1 position</option>
-          <option value="2">2 positions</option>
-          <option value="3" selected>3 positions</option>
-        </select>
-      </div>
-
-      <div class="field">
-        <label for="timeframe">Proposed chart timeframe</label>
-        <select id="timeframe">
-          <option value="H1" selected>H1 — 1 hour</option>
-          <option value="H4">H4 — 4 hours</option>
-          <option value="D1">D1 — Daily</option>
-        </select>
-      </div>
-
-    </div>
-
-    <div class="button-row">
-      <button class="primary" onclick="saveSettings()">
-        Save Dashboard Settings
-      </button>
-
-      <button class="secondary" onclick="resetSettings()">
-        Reset Settings
-      </button>
-    </div>
-
-    <div class="info-box" id="settingsMessage" aria-live="polite">
-      Dashboard settings have not been changed.
-    </div>
-  </section>
-
-  <div class="two-columns">
-
-    <section class="card">
-      <h2 class="section-title" style="margin-top:0">
-        System Checklist
-      </h2>
-
-      <ul class="check-list">
-        <li><span class="green">●</span> Dashboard webpage loaded</li>
-        <li><span class="yellow">●</span> Broker connection not configured</li>
-        <li><span class="yellow">●</span> EA compilation not verified</li>
-        <li><span class="yellow">●</span> Strategy backtest not verified</li>
-        <li><span class="yellow">●</span> Demo forward testing not verified</li>
-      </ul>
-    </section>
-
-    <section class="card">
-      <h2 class="section-title" style="margin-top:0">
-        Next Steps
-      </h2>
-
-      <ol class="check-list">
-        <li>Save this website as <strong>index.html</strong>.</li>
-        <li>Prepare the separate MQL5 Expert Advisor file.</li>
-        <li>Compile and test the EA in MetaTrader 5 on a supported computer.</li>
-        <li>Backtest and forward-test using a demo account.</li>
-        <li>Check trade sizing, stop losses and drawdown before considering live trading.</li>
-      </ol>
-    </section>
-
-  </div>
-
-</main>
-
-<footer>
-  <strong>LEE FOREX AUTOTRADER</strong><br>
-  Strategy dashboard · Demo preparation · Risk awareness<br><br>
-  Forex trading involves significant risk. Losses can exceed expectations.
-  No profit or trading outcome is guaranteed.
-</footer>
-
-<script>
-const defaultSettings = {
-  risk: "0.5",
-  dailyLoss: "2",
-  maxPositions: "3",
-  timeframe: "H1"
-};
-
-function loadSettings() {
-  try {
-    const saved = localStorage.getItem("leeForexSettings");
-
-    if (saved) {
-      const settings = JSON.parse(saved);
-
-      document.getElementById("risk").value =
-        settings.risk ?? defaultSettings.risk;
-
-      document.getElementById("dailyLoss").value =
-        settings.dailyLoss ?? defaultSettings.dailyLoss;
-
-      document.getElementById("maxPositions").value =
-        settings.maxPositions ?? defaultSettings.maxPositions;
-
-      document.getElementById("timeframe").value =
-        settings.timeframe ?? defaultSettings.timeframe;
-    }
-  } catch (error) {
-    console.log("Settings could not be loaded.");
-  }
-}
-
-function saveSettings() {
-  const risk = Number(document.getElementById("risk").value);
-  const dailyLoss = Number(document.getElementById("dailyLoss").value);
-  const maxPositions = Number(document.getElementById("maxPositions").value);
-  const timeframe = document.getElementById("timeframe").value;
-
-  if (!Number.isFinite(risk) || risk < 0.1 || risk > 1) {
-    alert("Enter a risk value between 0.1% and 1%.");
-    return;
-  }
-
-  if (!Number.isFinite(dailyLoss) || dailyLoss < 0.5 || dailyLoss > 5) {
-    alert("Enter a daily loss limit between 0.5% and 5%.");
-    return;
-  }
-
-  const settings = {
-    risk: risk.toString(),
-    dailyLoss: dailyLoss.toString(),
-    maxPositions: maxPositions.toString(),
-    timeframe: timeframe
-  };
-
-  try {
-    localStorage.setItem("leeForexSettings", JSON.stringify(settings));
-
-    document.getElementById("settingsMessage").textContent =
-      "Settings saved in this browser only. They have not been sent to your broker or trading robot.";
-  } catch (error) {
-    document.getElementById("settingsMessage").textContent =
-      "Your browser could not save these settings. You can still use the dashboard.";
-  }
-}
-
-function resetSettings() {
-  document.getElementById("risk").value = defaultSettings.risk;
-  document.getElementById("dailyLoss").value = defaultSettings.dailyLoss;
-  document.getElementById("maxPositions").value = defaultSettings.maxPositions;
-  document.getElementById("timeframe").value = defaultSettings.timeframe;
-
-  try {
-    localStorage.removeItem("leeForexSettings");
-  } catch (error) {
-    // Reset the visible settings even if storage is unavailable.
-  }
-
-  document.getElementById("settingsMessage").textContent =
-    "Dashboard settings have been reset. No broker settings were changed.";
-}
-
-function showDemoNotice() {
-  alert(
-    "Lee Forex AutoTrader dashboard is open. It is not connected to RCG Markets and cannot place trades. The separate Expert Advisor must be compiled and tested in MetaTrader 5."
-  );
-}
-
-loadSettings();
-</script>
-
-</body>
-</html>
+//+------------------------------------------------------------------+
